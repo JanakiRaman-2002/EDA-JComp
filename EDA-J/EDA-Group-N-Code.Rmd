@@ -1,0 +1,487 @@
+---
+title: An R Markdown document converted from "./sklearn script.ipynb"
+output: html_document
+---
+
+```{r}
+#INSTALLING LIBRARIES
+library(Hmisc)
+library(caTools)
+install.packages("neuralnet")
+library(neuralnet)
+
+
+##LAMBDA FUNCTION TO FIRE AWS ENDPOINT
+# grab environment variables
+ENDPOINT_NAME <- Sys.getenv("ENDPOINT_NAME")
+runtime <- boto3::client("runtime.sagemaker")
+
+lambda_handler <- function(event, context){
+  # TODO implement
+  payload <- jsonlite::fromJSON(jsonlite::toJSON(event))
+  payload_data <- as.character(payload$body)
+  print(payload_data)
+  response <- runtime$invoke_endpoint(EndpointName = ENDPOINT_NAME,
+                                      ContentType = "text/csv",
+                                      Body = payload_data)
+  result <- jsonlite::fromJSON(rawToChar(response$Body))
+  preds <- list("Prediction" = result)
+  response_dict <- list(
+    "statusCode" = 200,
+    "body" = jsonlite::toJSON(preds)
+  )
+  return(response_dict)
+}
+
+#READING DATASET
+df = read.csv("./cleaned_dataset.csv")
+head(df)
+
+#CHECKING NA VALUES
+any(is.na(df))
+sum(is.na(df))
+
+#REMOVING UNNAMED COLUMN
+
+df= df[-1]
+head(df)
+
+#DESCRIING DATASET
+describe(df['Label'])
+colnames(df)
+
+#DIMENSIONS
+dim(df)
+
+#SPLITTING INTO TRAIN AND TEST FOR MODEL TRAINING
+label = df[8]
+features = df
+  
+x = features
+y = label
+
+#TRAIN AND TEST DATA STRUCTURE
+head(x)
+head(y)
+dim(x)
+dim(y)
+
+Sample = sample.split(df, SplitRatio = 0.8)
+Train = subset(df, Sample==TRUE)
+Test = subset(df, Sample==FALSE)
+
+#COUNT OF DDOS LABELS
+table(y)
+
+
+#DATA VIRTUALIZATION
+
+hist(Test)
+plot(2:50)
+
+hist.data.frame(df)
+
+plot(colSums(df==0), type = "l", xlab = "Columns with 0 values", ylab = "Frequency")
+
+p1 = length(df$Protocol)
+p2 = length(df$Fwd.Pkt.Len.Min)
+p3 = length(df$Pkt.Len.Min)
+p4 = length(df$ACK.Flag)
+boxplot(p1,p2,p3,p4, at= c(1,2,3,4), names = c("Protocol", "Forward Pkt Length", "Pkt Length", "ACK Flag Count"))
+
+boxplot(df$Protocol, df$ACK.Flag.Cnt)
+boxplot(df$Fwd.Pkt.Len.Min, df$Bwd.Pkt.Len.Min)
+boxplot(df$Protocol,df$Fwd.Pkt.Len.Min,df$Pkt.Len.Min,df$ACK.Flag.Cnt, at= c(1,2,3,4), names = c("Protocol", "Forward Pkt Length", "Pkt Length", "ACK Flag Count"))
+
+
+#WRITING DATA TO DIFFERENT CSV FILES TO UPLOAD TO S3 BUCKET IN AWS
+
+write.csv(Train, "./Training.csv")
+write.csv(Test, "./Testing.csv")
+
+dim(Train)
+dim(Test)
+
+#ANN MODEL TRAINING 
+
+n <- names(Train) 
+n
+f <- as.formula(paste("Label ~",  
+                      paste(n[!n %in% "medv"], 
+                            collapse = " + "))) 
+
+ANN = neuralnet(f,data = Train,hidden = c(3, 2),linear.output = T)
+plot(ANN)
+
+```
+
+## DDOS DETECTION
+
+```{python}
+import sklearn # Check Sklearn version
+sklearn.__version__
+```
+
+
+
+## 1. Initialize Boto3 SDK and create S3 bucket. 
+
+```{python}
+import numpy as np
+from sagemaker import get_execution_role
+import sagemaker
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, StandardScaler, OneHotEncoder
+import datetime
+import time
+import tarfile
+import boto3
+import pandas as pd
+
+sm_boto3 = boto3.client("sagemaker")
+sess = sagemaker.Session()
+region = sess.boto_session.region_name
+bucket = 'ddos-detection' # Mention the created S3 bucket name here
+print("Using bucket " + bucket)
+```
+
+## 3. Data Exploration and Understanding.
+
+```{python}
+df = pd.read_csv("cleaned_dataset.csv")
+```
+
+```{python}
+df.head()
+```
+
+```{python}
+df.drop('Unnamed: 0', axis = 1, inplace = True)
+```
+
+```{python}
+df['Label'].value_counts(normalize=True)
+```
+
+```{python}
+df.columns
+```
+
+```{python}
+df.shape
+```
+
+```{python}
+features = list(df.columns)
+features
+```
+
+```{python}
+label = features.pop(-1)
+label
+```
+
+```{python}
+x = df[features]
+y = df[label]
+```
+
+```{python}
+x.head()
+```
+
+```{python}
+y.head()
+```
+
+```{python}
+x.shape
+```
+
+```{python}
+y.value_counts()
+```
+
+```{python}
+X_train, X_test, y_train, y_test = train_test_split(x,y, test_size=0.3, random_state=101)
+```
+
+```{python}
+print(X_train.shape)
+print(X_test.shape)
+print(y_train.shape)
+print(y_test.shape)
+```
+
+## 4. Split the data into Train/Test CSV File. 
+
+```{python}
+trainX = pd.DataFrame(X_train)
+trainX[label] = y_train
+
+testX = pd.DataFrame(X_test)
+testX[label] = y_test
+```
+
+```{python}
+print(trainX.shape)
+print(testX.shape)
+```
+
+```{python}
+trainX.head()
+```
+
+## 5. Upload data into the S3 Bucket.
+
+```{python}
+trainX.to_csv("train-V-1.csv",index = False)
+testX.to_csv("test-V-1.csv", index = False)
+```
+
+```{python}
+# send data to S3. SageMaker will take training data from s3
+sk_prefix = "sagemaker/ddos-detection/sklearncontainer"
+trainpath = sess.upload_data(
+    path="train-V-1.csv", bucket=bucket, key_prefix=sk_prefix
+)
+
+testpath = sess.upload_data(
+    path="test-V-1.csv", bucket=bucket, key_prefix=sk_prefix
+)
+```
+
+```{python}
+testpath
+```
+
+```{python}
+trainpath
+```
+
+## 6. Create Training Script
+
+```{python}
+%%writefile script.py
+
+
+from sklearn.neural_network import MLPClassifier
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, precision_score, recall_score, f1_score, roc_curve, auc
+import sklearn
+import joblib
+import boto3
+import pathlib
+from io import StringIO 
+import argparse
+import joblib
+import os
+import numpy as np
+import pandas as pd
+
+# inference functions ---------------
+
+# def input_fn(request_body, request_content_type):
+#     print(request_body)
+#     print(request_content_type)
+#     if request_content_type == "text/csv":
+#         request_body = request_body.strip()
+#         try:
+#             df = pd.read_csv(StringIO(request_body), header=None)
+#             return df
+        
+#         except Exception as e:
+#             print(e)
+#     else:
+#         return """Please use Content-Type = 'text/csv' and, send the request!!""" 
+ 
+    
+def model_fn(model_dir):
+    clf = joblib.load(os.path.join(model_dir, "model.joblib"))
+    return clf
+
+# def predict_fn(input_data, model):
+#     if type(input_data) != str:
+#         prediction = model.predict(input_data)
+#         print(prediction)
+#         return prediction
+#     else:
+#         return input_data
+        
+    
+if __name__ == "__main__":
+
+    print("[INFO] Extracting arguments")
+    parser = argparse.ArgumentParser()
+
+    # hyperparameters sent by the client are passed as command-line arguments to the script.
+    parser.add_argument("-hl1", type=int, default=1)
+    parser.add_argument("--hl2", type=int, default=1)
+    parser.add_argument("--alpha", type=float, default = 1.0)
+
+    # Data, model, and output directories
+    parser.add_argument("--model-dir", type=str, default=os.environ.get("SM_MODEL_DIR"))
+    parser.add_argument("--train", type=str, default=os.environ.get("SM_CHANNEL_TRAIN"))
+    parser.add_argument("--test", type=str, default=os.environ.get("SM_CHANNEL_TEST"))
+    parser.add_argument("--train-file", type=str, default="train-V-1.csv")
+    parser.add_argument("--test-file", type=str, default="test-V-1.csv")
+
+    args, _ = parser.parse_known_args()
+    
+    print("SKLearn Version: ", sklearn.__version__)
+    print("Joblib Version: ", joblib.__version__)
+
+    print("[INFO] Reading data")
+    print()
+    train_df = pd.read_csv(os.path.join(args.train, args.train_file))
+    test_df = pd.read_csv(os.path.join(args.test, args.test_file))
+    
+    features = list(train_df.columns)
+    label = features.pop(-1)
+    
+    print("Building training and testing datasets")
+    print()
+    X_train = train_df[features]
+    X_test = test_df[features]
+    y_train = train_df[label]
+    y_test = test_df[label]
+
+    print('Column order: ')
+    print(features)
+    print()
+    
+    print("Label column is: ",label)
+    print()
+    
+    print("Data Shape: ")
+    print()
+    print("---- SHAPE OF TRAINING DATA (85%) ----")
+    print(X_train.shape)
+    print(y_train.shape)
+    print()
+    print("---- SHAPE OF TESTING DATA (15%) ----")
+    print(X_test.shape)
+    print(y_test.shape)
+    print()
+    
+  
+    print("Training MLP MODEL.....")
+    print()
+    model = MLPClassifier(hidden_layer_sizes=(int(args.hl1), int(args.hl2)), activation='relu', solver='adam', alpha=args.alpha, max_iter=1000, random_state=42)
+    model.fit(X_train, y_train)
+    print()
+    
+
+    model_path = os.path.join(args.model_dir, "model.joblib")
+    joblib.dump(model,model_path)
+    print("Model persisted at " + model_path)
+    print()
+
+    
+    y_pred_test = model.predict(X_test)
+    test_acc = accuracy_score(y_test,y_pred_test)
+    test_rep = classification_report(y_test,y_pred_test)
+
+    print()
+    print("---- METRICS RESULTS FOR TESTING DATA ----")
+    print()
+    print("Total Rows are: ", X_test.shape[0])
+    print('[TESTING] Model Accuracy is: ', test_acc)
+    print('[TESTING] Testing Report: ')
+    print(test_rep)
+```
+
+```{python}
+! python script.py --hl2 5 \
+                   --hl1 6 \
+                   --alpha 0.005529107510830757 \
+                   --model-dir ./ \
+                   --train ./ \
+                   --test ./ \
+```
+
+## 7. Train script in-side Sagemaker container.
+
+```{python}
+from sagemaker.sklearn.estimator import SKLearn
+
+FRAMEWORK_VERSION = "0.23-1"
+
+sklearn_estimator = SKLearn(
+    entry_point="script.py",
+    role=get_execution_role(),
+    instance_count=1,
+    instance_type="ml.m5.large",
+    framework_version=FRAMEWORK_VERSION,
+    base_job_name="MLP-sklearn",
+    hyperparameters={
+        "hl1": 5,
+        "hl2": 6,
+        "alpha": 0.005529107510830757
+    },
+    use_spot_instances = True,
+    max_wait = 7200,
+    max_run = 3600
+)
+```
+
+```{python}
+sklearn_estimator.latest_training_job.wait(logs="None")
+artifact = sm_boto3.describe_training_job(
+    TrainingJobName=sklearn_estimator.latest_training_job.name
+)["ModelArtifacts"]["S3ModelArtifacts"]
+
+print("Model artifact persisted at " + artifact)
+```
+
+## 9. Deploy Sagemaker Endpoint(API) for trained model, and test it. 
+
+```{python}
+from sagemaker.sklearn.model import SKLearnModel
+from time import gmtime, strftime
+
+model_name = "Custom-sklearn-model-" + strftime("%Y-%m-%d-%H-%M-%S", gmtime())
+model = SKLearnModel(
+    name =  model_name,
+    model_data=artifact,
+    role=get_execution_role(),
+    entry_point="script.py",
+    framework_version=FRAMEWORK_VERSION,
+)
+```
+
+```{python}
+endpoint_name = "Custom-sklearn-model-" + strftime("%Y-%m-%d-%H-%M-%S", gmtime())
+print("EndpointName={}".format(endpoint_name))
+
+predictor = model.deploy(
+    initial_instance_count=1,
+    instance_type="ml.m4.xlarge",
+    endpoint_name=endpoint_name,
+)
+```
+
+```{python}
+testX[features][0:2].values.tolist()
+```
+
+```{python}
+print(predictor.predict(testX[features][0:2].values.tolist()))
+```
+
+```{python}
+import io
+```
+
+```{python}
+def np2csv(arr):
+    csv = io.BytesIO()
+    np.savetxt(csv,arr,delimiter=",",fmt="%g")
+    return csv.getvalue().decode().rstrip()
+```
+
+##  deleting the endpoint !
+
+```{python}
+sm_boto3.delete_endpoint(EndpointName=endpoint_name)
+```
+
