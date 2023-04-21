@@ -1,0 +1,1 @@
+https://runtime.sagemaker.ap-south-1.amazonaws.com/endpoints/Custom-sklearn-model-2023-04-08-04-21-49/invocations
